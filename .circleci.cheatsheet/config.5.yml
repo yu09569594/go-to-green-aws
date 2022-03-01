@@ -1,0 +1,187 @@
+version: 2.1
+
+orbs:
+  docker: circleci/docker@2.0.2
+
+executors:
+  docker-builder:
+    machine:
+      image: ubuntu-2004:current
+      docker_layer_caching: true
+
+commands:
+  install-kube-toolchain:
+    steps:
+      - run:
+          name: Install cURL
+          command: |
+            apt update
+            apt install -y curl
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+      - run:
+          name: Install kubectl
+          working_directory: tmp
+          command: |
+            curl -fsSJLO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            echo "$(curl -fsSJL "https://dl.k8s.io/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256")" kubectl | sha256sum --check
+            install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+      - run:
+          name: Install Helm
+          working_directory: tmp
+          command: |
+            curl -fsSJL https://get.helm.sh/helm-v3.7.1-linux-amd64.tar.gz | tar -xz
+            install -o root -g root -m 0755 linux-amd64/helm /usr/local/bin/helm
+
+  setup-kubeconfig:
+    steps:
+      - run:
+          name: Configure AWS_* environment variables
+          command: |
+            cat \<<EOD | tee -a $BASH_ENV
+            export AWS_ROLE_ARN="arn:aws:iam::660990364978:role/makoto"
+            export AWS_WEB_IDENTITY_TOKEN_FILE="$(mktemp -u)"
+            EOD
+
+            source $BASH_ENV
+
+            printenv CIRCLE_OIDC_TOKEN > "${AWS_WEB_IDENTITY_TOKEN_FILE}"
+      - run:
+          name: Install AWS CLI
+          command: |
+            apt update
+            apt install -y awscli
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+      - run: aws eks update-kubeconfig --name makoto-workbench --region ap-northeast-1
+
+jobs:
+  prepare-dependencies:
+    docker:
+      - image: node:current-slim
+    steps:
+      - checkout
+      - run:
+          name: Compute version number
+          command: echo "0.0.${CIRCLE_BUILD_NUM}-${CIRCLE_SHA1:0:7}" | tee version.txt
+      - restore_cache:
+          keys:
+            - yarn-deps-{{ checksum "yarn.lock" }}
+            - yarn-deps
+      - run:
+          name: yarn install
+          command: yarn install
+      - save_cache:
+          paths:
+            - node_modules
+          key: yarn-deps-{{ checksum "yarn.lock" }}-{{ epoch }}
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  build:
+    docker:
+      - image: node:current-slim
+    steps:
+      - attach_workspace:
+          at: .
+      - run:
+          name: yarn build
+          command: |
+            export __BUILD_VERSION=$(cat version.txt)
+
+            if [ -z "$__BUILD_VERSION" ]
+            then
+              echo Build version is not specified.
+              exit 1
+            fi
+
+            yarn build
+      - store_artifacts:
+          path: dist/server.js
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  unit-tests:
+    docker:
+      - image: node:current-slim
+    parallelism: 2
+    resource_class: large
+    steps:
+      - attach_workspace:
+          at: .
+      - run:
+          name: Run tests
+          command: |
+            circleci tests glob '**/*.test.ts' | circleci tests split --split-by timings | xargs yarn test:ci
+      - store_artifacts:
+          path: test-results
+      - store_test_results:
+          path: test-results
+
+  deploy-helm:
+    docker:
+      - image: ubuntu:rolling
+    steps:
+      - attach_workspace:
+          at: .
+
+      - install-kube-toolchain
+      - setup-kubeconfig
+
+      - run:
+          name: Deploy with Helm
+          working_directory: charts
+          command: |
+            K8S_NS="go-to-green"
+            BUILD_VERSION="$(cat ../version.txt)"
+            HELM_CMD="helm upgrade"
+
+            if [ $(helm list -q -n "${K8S_NS}" | wc -l) -eq 0 ]
+            then
+              HELM_CMD="helm install --create-namespace"
+            fi
+
+            eval "${HELM_CMD}" -n "${K8S_NS}" --set images.name.app.tag="'${BUILD_VERSION}'" go-to-green .
+
+workflows:
+  run:
+    jobs:
+      - prepare-dependencies
+      - build:
+          requires:
+            - prepare-dependencies
+      - docker/publish:
+          requires:
+            - build
+          context:
+            - docker-hub
+          executor: docker-builder
+          attach-at: .
+          docker-username: DOCKER_USERNAME
+          image: makotom/go-to-green
+          tag: $__BUILD_VERSION
+          before_build:
+            - run:
+                name: Configuring build version
+                command: |
+                  echo "export export __BUILD_VERSION='$(cat version.txt)'" | tee -a $BASH_ENV
+      - unit-tests:
+          requires:
+            - prepare-dependencies
+      - wait-deploy-approval:
+          type: approval
+          requires:
+            - docker/publish
+            - unit-tests
+          filters:
+            branches:
+              only: main
+      - deploy-helm:
+          requires:
+            - wait-deploy-approval
+          context:
+            - makotom-only
