@@ -136,16 +136,7 @@ jobs:
           name: Deploy with Helm
           working_directory: charts
           command: |
-            K8S_NS="go-to-green"
-            BUILD_VERSION="$(cat ../version.txt)"
-            HELM_CMD="helm upgrade"
-
-            if [ $(helm list -q -n "${K8S_NS}" | wc -l) -eq 0 ]
-            then
-              HELM_CMD="helm install --create-namespace"
-            fi
-
-            eval "${HELM_CMD}" -n "${K8S_NS}" --set images.name.app.tag="'${BUILD_VERSION}'" go-to-green .
+            helm upgrade --install -n go-to-green --set images.name.app.tag="$(cat ../version.txt)" go-to-green .
 
 workflows:
   run:
