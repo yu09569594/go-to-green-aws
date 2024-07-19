@@ -18,4 +18,4 @@ workflows:
       - world1
       - world2
           requires:
-            - world
+            - world1
