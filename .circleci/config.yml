@@ -17,5 +17,5 @@ workflows:
     jobs:
       - world1
       - world2
-        requires:
-          - world
+          requires:
+            - world
