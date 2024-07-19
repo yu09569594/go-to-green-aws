@@ -12,8 +12,10 @@ jobs:
     steps:
       - run: echo "Hello world2!"
 
-  workflows:
-    hello:
-      jobs:
-        - world1
-        - world2
+workflows:
+  hello:
+    jobs:
+      - world1
+      - world2
+        requires:
+          - world
