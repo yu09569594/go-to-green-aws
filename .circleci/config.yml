@@ -6,8 +6,14 @@ jobs:
       - image: node:current-slim
     steps:
       - run: echo "Hello world1!"
-  world1:
+  world2:
     docker:
       - image: node:current-slim
     steps:
       - run: echo "Hello world2!"
+
+  workflows:
+   hello:
+    jobs:
+     - world1
+     - world2
